@@ -1,0 +1,39 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-733f67c2a904dff1079c3c025dfacdbc5aff46d9",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "userSourceNameMap": {
+    "contracts/Product.sol": "project/contracts/Product.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode",
+            "evm.deployedBytecode",
+            "evm.methodIdentifiers",
+            "metadata"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/Product.sol": {
+        "content": " // SPDX-License-Identifier: MIT\r\npragma solidity ^0.8.28;\r\n\r\n/**\r\n * @title ProductIdentification\r\n * @dev Merged contract for high-performance product traceability with dual-signature support.\r\n */\r\ncontract ProductIdentification {\r\n    \r\n    // --- 1. STATE VARIABLES & OPTIMIZED PACKING ---\r\n    address public owner;\r\n    uint256 public productCount;\r\n\r\n    struct Product {\r\n        uint256 id;\r\n        string serialNumber;      // [System Model Requirement]\r\n        string name;\r\n        string brand;             // [System Model Requirement]\r\n        string description;\r\n        string manufactDate;      // Timestamp at original company\r\n        string imageUrl;          // [System Model Requirement]\r\n        address currentOwner;     // 20 bytes\r\n        bool isSold;              // 1 byte - Packed with address to save 20k gas\r\n        address[] history;        // Traceability Chain\r\n        string[] locationHistory; // Provenance locations [System Model Requirement]\r\n        string[] actorNames;      // Names for history actors\r\n        string[] timestampHistory; // Timestamps for history entries\r\n        string manufacturerName;\r\n        string manufacturerSig;   // Company unique signature\r\n        address[] allowedRetailers; \r\n        string retailerSig;       // Retailer unique signature (single for simplicity; could be array for multiple)\r\n    }\r\n\r\n    // --- 2. O(1) MAPPING LOGIC ---\r\n    mapping(uint256 => Product) public products;\r\n\r\n    // --- 3. EVENTS (Frontend Listening) ---\r\n    event ProductCreated(uint256 indexed id, string name, address indexed manufacturer);\r\n    event ProductTransferred(uint256 indexed id, address indexed from, address indexed to);\r\n    event ProductReceivedByRetailer(uint256 indexed id, address indexed retailer, string location);\r\n\r\n    // --- 4. CUSTOM GAS-SAVING ERRORS ---\r\n    error Unauthorized();\r\n    error ProductNotFound();\r\n\r\n    constructor() {\r\n        owner = msg.sender; \r\n    }\r\n\r\n    modifier onlyOwner() {\r\n        if (msg.sender != owner) revert Unauthorized();\r\n        _;\r\n    }\r\n\r\n    function contains(address[] memory array, address value) internal pure returns (bool) {\r\n        for (uint i = 0; i < array.length; i++) {\r\n            if (array[i] == value) return true;\r\n        }\r\n        return false;\r\n    }\r\n\r\n    // --- 5. ENHANCED LOGIC ---\r\n\r\n    /**\r\n     * @dev Manufacturer adds product with full metadata and genesis signature.\r\n     */\r\n    function addProduct(\r\n        string memory _serial,\r\n        string memory _name,\r\n        string memory _brand,\r\n        string memory _description,\r\n        string memory _image,\r\n        string memory _date,\r\n        string memory _mfgLocation,\r\n        string memory _mfgSig,\r\n        string memory _manufacturerName,\r\n        address[] memory _allowedRetailers\r\n    ) public {\r\n        productCount++;\r\n        Product storage newProduct = products[productCount];\r\n        newProduct.id = productCount;\r\n        newProduct.serialNumber = _serial;\r\n        newProduct.name = _name;\r\n        newProduct.brand = _brand;\r\n        newProduct.description = _description;\r\n        newProduct.imageUrl = _image;\r\n        newProduct.manufactDate = _date;\r\n        newProduct.currentOwner = msg.sender;\r\n        newProduct.isSold = false;\r\n        newProduct.manufacturerSig = _mfgSig;\r\n        newProduct.manufacturerName = _manufacturerName;\r\n        newProduct.allowedRetailers = _allowedRetailers;\r\n\r\n        newProduct.history.push(msg.sender);\r\n        newProduct.locationHistory.push(_mfgLocation);\r\n        newProduct.actorNames.push(_manufacturerName);\r\n        newProduct.timestampHistory.push(_date);\r\n\r\n        emit ProductCreated(productCount, _name, msg.sender);\r\n    }\r\n\r\n    /**\r\n     * @dev Retailer scans QR and updates location/signature. \r\n     * Status remains isSold = false per System Model.\r\n     */\r\n    function retailerReceive(\r\n        uint256 _productId,\r\n        string memory _retailerLocation,\r\n        string memory _retSig,\r\n        string memory _retailerName,\r\n        string memory _retailerTimestamp\r\n    ) public {\r\n        Product storage p = products[_productId];\r\n        if (p.id == 0) revert ProductNotFound();\r\n        if (!contains(p.allowedRetailers, msg.sender)) revert Unauthorized();\r\n\r\n        address oldOwner = p.currentOwner;\r\n        p.currentOwner = msg.sender;\r\n        p.retailerSig = _retSig;\r\n        p.isSold = false; \r\n\r\n        p.history.push(msg.sender);\r\n        p.locationHistory.push(_retailerLocation);\r\n        p.actorNames.push(_retailerName);\r\n        p.timestampHistory.push(_retailerTimestamp);\r\n\r\n        emit ProductTransferred(_productId, oldOwner, msg.sender);\r\n        emit ProductReceivedByRetailer(_productId, msg.sender, _retailerLocation);\r\n    }\r\n\r\n    /**\r\n     * @dev Final sale to consumer. Sets isSold to true.\r\n     */\r\n    function sellToConsumer(uint256 _productId) public {\r\n        Product storage p = products[_productId];\r\n        if (p.currentOwner != msg.sender) revert Unauthorized();\r\n        \r\n        p.isSold = true;\r\n    }\r\n\r\n    /**\r\n     * @dev Returns full provenance: address chain, location chain, actor names, timestamps.\r\n     */\r\n    function getProductHistory(uint256 _productId) \r\n        public \r\n        view \r\n        returns (address[] memory, string[] memory, string[] memory, string[] memory) \r\n    {\r\n        Product storage p = products[_productId];\r\n        return (p.history, p.locationHistory, p.actorNames, p.timestampHistory);\r\n    }\r\n}"
+      }
+    }
+  }
+}
