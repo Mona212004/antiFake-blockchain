@@ -1,50 +1,55 @@
- // SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
 /**
  * @title ProductIdentification
- * @dev Merged contract for high-performance product traceability with dual-signature support.
+ * @dev High-performance product traceability contract with dual-signature support and on-chain intended retailer.
  */
 contract ProductIdentification {
-    
-    // --- 1. STATE VARIABLES & OPTIMIZED PACKING ---
+
+    // --- 1. STATE VARIABLES ---
     address public owner;
     uint256 public productCount;
 
     struct Product {
         uint256 id;
-        string serialNumber;      // [System Model Requirement]
+        string serialNumber;
         string name;
-        string brand;             // [System Model Requirement]
+        string brand;
         string description;
-        string manufactDate;      // Timestamp at original company
-        string imageUrl;          // [System Model Requirement]
-        address currentOwner;     // 20 bytes
-        bool isSold;              // 1 byte - Packed with address to save 20k gas
-        address[] history;        // Traceability Chain
-        string[] locationHistory; // Provenance locations [System Model Requirement]
-        string[] actorNames;      // Names for history actors
-        string[] timestampHistory; // Timestamps for history entries
+        string manufactDate;
+        string imageUrl;
+        address currentOwner;
+        bool isSold;
+        address[] history;
+        string[] locationHistory;
+        string[] actorNames;
+        string[] timestampHistory;
         string manufacturerName;
-        string manufacturerSig;   // Company unique signature
-        address[] allowedRetailers; 
-        string retailerSig;       // Retailer unique signature (single for simplicity; could be array for multiple)
+        string manufacturerSig;
+        address[] allowedRetailers;
+        string intendedRetailer;    // Retailer name set at registration (on-chain)
+        string retailerSig;
     }
 
-    // --- 2. O(1) MAPPING LOGIC ---
     mapping(uint256 => Product) public products;
 
-    // --- 3. EVENTS (Frontend Listening) ---
-    event ProductCreated(uint256 indexed id, string name, address indexed manufacturer);
+    // --- 2. EVENTS ---
+    event ProductCreated(
+        uint256 indexed id,
+        string name,
+        address indexed manufacturer,
+        string intendedRetailer
+    );
     event ProductTransferred(uint256 indexed id, address indexed from, address indexed to);
     event ProductReceivedByRetailer(uint256 indexed id, address indexed retailer, string location);
 
-    // --- 4. CUSTOM GAS-SAVING ERRORS ---
+    // --- 3. ERRORS ---
     error Unauthorized();
     error ProductNotFound();
 
     constructor() {
-        owner = msg.sender; 
+        owner = msg.sender;
     }
 
     modifier onlyOwner() {
@@ -59,10 +64,8 @@ contract ProductIdentification {
         return false;
     }
 
-    // --- 5. ENHANCED LOGIC ---
-
     /**
-     * @dev Manufacturer adds product with full metadata and genesis signature.
+     * @dev Manufacturer adds a product with intended retailer name stored on-chain
      */
     function addProduct(
         string memory _serial,
@@ -74,34 +77,37 @@ contract ProductIdentification {
         string memory _mfgLocation,
         string memory _mfgSig,
         string memory _manufacturerName,
-        address[] memory _allowedRetailers
+        address[] memory _allowedRetailers,
+        string memory _intendedRetailerName  // Retailer shop name from frontend
     ) public {
         productCount++;
-        Product storage newProduct = products[productCount];
-        newProduct.id = productCount;
-        newProduct.serialNumber = _serial;
-        newProduct.name = _name;
-        newProduct.brand = _brand;
-        newProduct.description = _description;
-        newProduct.imageUrl = _image;
-        newProduct.manufactDate = _date;
-        newProduct.currentOwner = msg.sender;
-        newProduct.isSold = false;
-        newProduct.manufacturerSig = _mfgSig;
-        newProduct.manufacturerName = _manufacturerName;
-        newProduct.allowedRetailers = _allowedRetailers;
+        Product storage p = products[productCount];
 
-        newProduct.history.push(msg.sender);
-        newProduct.locationHistory.push(_mfgLocation);
-        newProduct.actorNames.push(_manufacturerName);
-        newProduct.timestampHistory.push(_date);
+        p.id = productCount;
+        p.serialNumber = _serial;
+        p.name = _name;
+        p.brand = _brand;
+        p.description = _description;
+        p.imageUrl = _image;
+        p.manufactDate = _date;
+        p.currentOwner = msg.sender;
+        p.isSold = false;
+        p.manufacturerSig = _mfgSig;
+        p.manufacturerName = _manufacturerName;
+        p.allowedRetailers = _allowedRetailers;
+        p.intendedRetailer = _intendedRetailerName;  // Stored on-chain
 
-        emit ProductCreated(productCount, _name, msg.sender);
+        // Initialize history
+        p.history.push(msg.sender);
+        p.locationHistory.push(_mfgLocation);
+        p.actorNames.push(_manufacturerName);
+        p.timestampHistory.push(_date);
+
+        emit ProductCreated(productCount, _name, msg.sender, _intendedRetailerName);
     }
 
     /**
-     * @dev Retailer scans QR and updates location/signature. 
-     * Status remains isSold = false per System Model.
+     * @dev Retailer receives product and adds their signature
      */
     function retailerReceive(
         uint256 _productId,
@@ -117,7 +123,7 @@ contract ProductIdentification {
         address oldOwner = p.currentOwner;
         p.currentOwner = msg.sender;
         p.retailerSig = _retSig;
-        p.isSold = false; 
+        p.isSold = false;
 
         p.history.push(msg.sender);
         p.locationHistory.push(_retailerLocation);
@@ -129,24 +135,33 @@ contract ProductIdentification {
     }
 
     /**
-     * @dev Final sale to consumer. Sets isSold to true.
+     * @dev Final sale to consumer
      */
     function sellToConsumer(uint256 _productId) public {
         Product storage p = products[_productId];
         if (p.currentOwner != msg.sender) revert Unauthorized();
-        
         p.isSold = true;
     }
 
     /**
-     * @dev Returns full provenance: address chain, location chain, actor names, timestamps.
+     * @dev Returns full provenance history
      */
-    function getProductHistory(uint256 _productId) 
-        public 
-        view 
-        returns (address[] memory, string[] memory, string[] memory, string[] memory) 
+    function getProductHistory(uint256 _productId)
+        public
+        view
+        returns (
+            address[] memory,
+            string[] memory,
+            string[] memory,
+            string[] memory
+        )
     {
         Product storage p = products[_productId];
-        return (p.history, p.locationHistory, p.actorNames, p.timestampHistory);
+        return (
+            p.history,
+            p.locationHistory,
+            p.actorNames,
+            p.timestampHistory
+        );
     }
 }

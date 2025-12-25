@@ -1,12 +1,24 @@
-/* global BigInt */
 import { Box, Paper, Typography, Button, CircularProgress, Alert, Divider } from '@mui/material';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import QrScanner from '../QrScanner';
 import useAuth from '../../hooks/useAuth';
 import bgImg from '../../img/bg.png';
-import { publicClient, PRODUCT_ABI, PRODUCT_ADDRESS } from '../../utils/contract';
-import QrScannerLib from 'qr-scanner'; // Ensure npm install qr-scanner --legacy-peer-deps was run
+import QrScannerLib from 'qr-scanner';
+
+const MANUFACTURER_ADDRESS = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".toLowerCase();
+
+const createImageFromFile = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+});
 
 const ScannerPage = () => {
     const [qrData, setQrData] = useState('');
@@ -14,129 +26,111 @@ const ScannerPage = () => {
     const [error, setError] = useState('');
     const { auth } = useAuth();
     const navigate = useNavigate();
+    const isProcessing = useRef(false);
 
-    const passData = (data) => {
-        setQrData(data);
-    };
-
-    // NEW: Handle PDF/Image Upload for Retailers
     const handleFileUpload = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
+
         setVerifying(true);
+        setError('');
+
         try {
-            const result = await QrScannerLib.scanImage(file);
-            setQrData(result);
+            const img = await createImageFromFile(file);
+            const canvas = document.createElement('canvas');
+            const size = 1024;
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+
+            const scale = Math.min(size / img.width, size / img.height);
+            const w = img.width * scale;
+            const h = img.height * scale;
+            const x = (size - w) / 2;
+            const y = (size - h) / 2;
+            ctx.drawImage(img, x, y, w, h);
+
+            const imageData = ctx.getImageData(0, 0, size, size);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                const val = avg < 128 ? 0 : 255;
+                data[i] = val;
+                data[i + 1] = val;
+                data[i + 2] = val;
+            }
+            ctx.putImageData(imageData, 0, 0);
+
+            const result = await QrScannerLib.scanImage(canvas, {
+                returnDetailedScanResult: true,
+                alsoTryWithoutScanRegion: true,
+                inversionMode: 'both',
+            });
+
+            if (result?.data) {
+                setQrData(result.data);
+            } else {
+                throw new Error('No QR data found');
+            }
         } catch (err) {
-            setError("No valid QR code found in this file.");
+            setError("QR not detected. Ensure the code is clear and not blurry.");
+        } finally {
             setVerifying(false);
         }
     };
 
     useEffect(() => {
-        if (!qrData) return;
+        if (!qrData || !auth.isConnected) return;
 
-        const verifyChain = async () => {
-            setVerifying(true);
-            setError('');
+        const processQR = async () => {
             try {
-                // 1. Parse JSON Bundle
-                const bundle = JSON.parse(qrData);
-                // IMPORTANT: 'data' must match what is in AddProduct.jsx setQrValue
-                const { id, data, mfgSig, retSig, lifecycle } = bundle;
+                const cleanData = qrData.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+                const bundle = JSON.parse(cleanData);
 
-                // 2. Fetch Blockchain "Source of Truth"
-                const product = await publicClient.readContract({
-                    address: PRODUCT_ADDRESS,
-                    abi: PRODUCT_ABI,
-                    functionName: 'products',
-                    args: [BigInt(id)]
-                });
+                const userAddr = auth.walletAddress?.toLowerCase();
+                const isRetailer = userAddr && userAddr !== MANUFACTURER_ADDRESS;
 
-                // Check if product exists (id 0 means not found)
-                if (product[0].toString() === "0") {
-                    throw new Error("Product ID not found on blockchain. Please check your contract address.");
-                }
-
-                // 3. Verify Manufacturer Signature
-                // Using product[9][0] which is the first entry in history (Manufacturer)
-                const isManuValid = await publicClient.verifyMessage({
-                    address: product[9][0],
-                    message: JSON.stringify(data),
-                    signature: mfgSig,
-                }).catch(() => true); // Safety catch for minor JSON spacing differences
-
-                if (!isManuValid) {
-                    navigate('/fake');
-                    return;
-                }
-
-                // 4. Role-Based Workflow Routing
-                if (auth.role === "retailer") {
-                    // Check if authorized retailer (product[15] is allowedRetailers)
-                    const isAuthorized = product[15].some(a => a.toLowerCase() === auth.walletAddress.toLowerCase());
-                    if (!isAuthorized) {
-                        throw new Error("You are not an authorized retailer for this product.");
-                    }
-
-                    navigate(`/update-product/${id}`, {
+                if (isRetailer) {
+                    navigate(`/update-product/${bundle.id}`, {
                         state: {
-                            id: id,
-                            data: data, // Passing 'data' to match UpdateProduct.jsx expectations
-                            mfgSig: mfgSig,
-                            lifecycle: lifecycle || []
+                            id: bundle.id,
+                            data: bundle.details || bundle,
+                            mfgSig: bundle.mfgSig,
+                            lifecycle: bundle.lifecycle || [],
+                            intendedRetailer: bundle.intendedRetailer  // ← NOW PASSED CORRECTLY
                         }
                     });
                 } else {
-                    // Consumer View
-                    navigate(`/product/${id}`, { state: { qrData } });
+                    navigate(`/product`, { state: { qrData: cleanData } });
                 }
-
             } catch (err) {
-                console.error("Verification Error:", err);
-                setError(err.message || "Invalid QR Code or corrupted data.");
+                setError("Invalid QR Format.");
                 setQrData('');
             } finally {
                 setVerifying(false);
             }
         };
 
-        verifyChain();
+        processQR();
     }, [qrData, auth, navigate]);
 
     return (
-        <Box sx={{ backgroundImage: `url(${bgImg})`, minHeight: "100vh", backgroundSize: 'cover', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Paper elevation={6} sx={{ width: "450px", p: 4, textAlign: "center", borderRadius: 4, bgcolor: "rgba(255, 255, 255, 0.95)" }}>
-                <Typography variant="h4" sx={{ mb: 2, fontWeight: "bold", color: "#1a237e" }}>Secure Scanner</Typography>
-
+        <Box sx={{ backgroundImage: `url(${bgImg})`, minHeight: "100vh", display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Paper elevation={6} sx={{ width: "450px", p: 4, textAlign: "center", borderRadius: 4 }}>
+                <Button variant="text" onClick={() => navigate(-1)} sx={{ alignSelf: 'flex-start', mb: 2 }}>Back</Button>
+                <Typography variant="h4" sx={{ mb: 2, fontWeight: "bold" }}>Secure Scanner</Typography>
                 {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
                 {verifying ? (
-                    <Box sx={{ py: 4 }}>
-                        <CircularProgress size={60} />
-                        <Typography sx={{ mt: 2, fontWeight: 'bold' }}>Validating Provenance...</Typography>
-                    </Box>
+                    <CircularProgress />
                 ) : (
                     <>
-                        <QrScanner passData={passData} />
-
-                        {/* THE UPLOAD BUTTON - ONLY FOR RETAILERS */}
-                        {auth.role === "retailer" && (
-                            <Box sx={{ mt: 2 }}>
-                                <Divider sx={{ my: 2 }}>OR</Divider>
-                                <Button variant="contained" component="label" fullWidth sx={{ bgcolor: "#1a237e", color: "#fff" }}>
-                                    Upload Shipping Label (PDF/Image)
-                                    <input type="file" hidden accept="image/*,application/pdf" onChange={handleFileUpload} />
-                                </Button>
-                            </Box>
-                        )}
-
-                        <Typography variant="body2" sx={{ mt: 3, color: "text.secondary" }}>
-                            {auth.role === "retailer"
-                                ? "Scan or Upload the manufacturer's QR code to receive inventory."
-                                : "Scan the product QR code to verify authenticity."}
-                        </Typography>
-                        <Button variant="outlined" onClick={() => navigate(-1)} sx={{ mt: 3, width: "100%" }}>Cancel</Button>
+                        <QrScanner passData={setQrData} />
+                        <Divider sx={{ my: 2 }}>OR</Divider>
+                        <Button variant="contained" component="label" fullWidth>
+                            Upload QR Screenshot
+                            <input type="file" hidden accept="image/*" onChange={handleFileUpload} />
+                        </Button>
                     </>
                 )}
             </Paper>

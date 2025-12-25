@@ -1,20 +1,14 @@
 /* global BigInt */
 import { Box, Paper, Avatar, Typography, Button, Chip, Stack, Divider, CircularProgress } from '@mui/material';
-import bgImg from '../../img/bg.png';
-import Timeline from '@mui/lab/Timeline';
-import TimelineItem from '@mui/lab/TimelineItem';
-import TimelineSeparator from '@mui/lab/TimelineSeparator';
-import TimelineConnector from '@mui/lab/TimelineConnector';
-import TimelineContent from '@mui/lab/TimelineContent';
-import TimelineDot from '@mui/lab/TimelineDot';
-import TimelineOppositeContent, {
-    timelineOppositeContentClasses,
-} from '@mui/lab/TimelineOppositeContent';
+import { Timeline, TimelineItem, TimelineSeparator, TimelineConnector, TimelineContent, TimelineDot, TimelineOppositeContent, timelineOppositeContentClasses } from '@mui/lab';
 import VerifiedUserIcon from '@mui/icons-material/VerifiedUser';
 import StorefrontIcon from '@mui/icons-material/Storefront';
+import SecurityIcon from '@mui/icons-material/Security';
+import FactoryIcon from '@mui/icons-material/Factory';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useEffect, useState, useCallback } from 'react';
 import { publicClient, PRODUCT_ABI, PRODUCT_ADDRESS } from '../../utils/contract';
+import bgImg from '../../img/bg.png';
 
 const Product = () => {
     const navigate = useNavigate();
@@ -22,22 +16,17 @@ const Product = () => {
     const qrData = location.state?.qrData;
 
     const [product, setProduct] = useState(null);
-    const [history, setHistory] = useState([]);
-    const [locations, setLocations] = useState([]);
-    const [actors, setActors] = useState([]);
-    const [times, setTimes] = useState([]);
+    const [lifecycle, setLifecycle] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [valid, setValid] = useState(true);
+    const [isValid, setIsValid] = useState(true);
 
     const handleVerifyProduct = useCallback(async (scannedData) => {
         setLoading(true);
         try {
-            // 1. Parse the QR JSON Bundle
-            const parsedBundle = JSON.parse(scannedData);
-            const productId = BigInt(parsedBundle.id);
-            const { data: qrMetadata, mfgSig, retSig } = parsedBundle;
+            const bundle = JSON.parse(scannedData);
+            const productId = BigInt(bundle.id);
 
-            // 2. Fetch ground-truth data from Blockchain
+            // Fetch on-chain data for cross-verification
             const chainData = await publicClient.readContract({
                 address: PRODUCT_ADDRESS,
                 abi: PRODUCT_ABI,
@@ -45,87 +34,49 @@ const Product = () => {
                 args: [productId]
             });
 
-            // 3. Map the Struct from Product.sol (adjusted indices)
-            const mappedProduct = {
-                id: chainData[0].toString(),
-                serialNumber: chainData[1],
-                name: chainData[2],
-                brand: chainData[3],
-                description: chainData[4],
-                manufactDate: chainData[5],
-                imageUrl: chainData[6],
-                currentOwner: chainData[7],
-                isSold: chainData[8],
-                history: chainData[9],
-                locationHistory: chainData[10],
-                actorNames: chainData[11],
-                timestampHistory: chainData[12],
-                manufacturerName: chainData[13],
-                mfgSig: chainData[14],
-                allowedRetailers: chainData[15],
-                retSig: chainData[16],
-            };
-
-            // 4. Fetch history
-            const [histAddrs, histLocs, histActors, histTimes] = await publicClient.readContract({
-                address: PRODUCT_ADDRESS,
-                abi: PRODUCT_ABI,
-                functionName: 'getProductHistory',
-                args: [productId]
-            });
-
-            setHistory(histAddrs);
-            setLocations(histLocs);
-            setActors(histActors);
-            setTimes(histTimes);
-
-            // 5. Reconstruct signed message from chain
-            const reconstructed = {
-                serial: mappedProduct.serialNumber,
-                name: mappedProduct.name,
-                brand: mappedProduct.brand,
-                description: mappedProduct.description,
-                imageUrl: mappedProduct.imageUrl,
-                date: mappedProduct.manufactDate,
-                manufacturerName: mappedProduct.manufacturerName,
-                retailerList: mappedProduct.allowedRetailers,
-                lifecycle: histTimes.map((time, i) => ({
-                    status: i === 0 ? 'Manufactured' : 'Received by Retailer',
-                    location: histLocs[i].split(', ')[1],
-                    timestamp: time,
-                    actor: histActors[i],
-                    details: i === 0 ? 'Product registered by manufacturer' : 'Received by retailer'
-                }))
-            };
-
-            const message = JSON.stringify(reconstructed);
-
-            // 6. Verify sigs
-            const isManuValid = await publicClient.verifyMessage({
-                address: histAddrs[0],
+            // Verify manufacturer signature
+            const message = JSON.stringify(bundle.details);
+            const isMfgSigValid = await publicClient.verifyMessage({
+                address: chainData[7], // manufacturer address from contract
                 message,
-                signature: mfgSig,
+                signature: bundle.mfgSig,
             });
 
-            let isRetValid = true;
-            if (retSig && mappedProduct.retSig) {
-                isRetValid = await publicClient.verifyMessage({
-                    address: mappedProduct.currentOwner,
-                    message,
-                    signature: retSig,
-                });
-            }
-
-            if (!isManuValid || !isRetValid) {
-                setValid(false);
+            if (!isMfgSigValid) {
+                setIsValid(false);
                 navigate('/fake');
                 return;
             }
 
+            // Extract manufacturer origin (always first entry)
+            const mfgEntry = bundle.lifecycle[0] || {};
+            const latestEntry = bundle.lifecycle[bundle.lifecycle.length - 1] || mfgEntry;
+
+            const mappedProduct = {
+                id: bundle.id,
+                serialNumber: bundle.details.serial,
+                name: bundle.details.name,
+                brand: bundle.details.brand,
+                description: bundle.details.desc || bundle.details.description || '',
+                imageUrl: bundle.details.img || bundle.details.imageUrl || '',
+                manufacturerName: mfgEntry.entity || chainData[13],
+                originLocation: mfgEntry.location || 'Not specified',
+                productionDate: mfgEntry.time,
+                currentLocation: latestEntry.location,
+                currentHolder: latestEntry.entity || mfgEntry.entity,
+                isSold: chainData[8], // true if marked sold on-chain (future feature)
+                mfgSig: bundle.mfgSig,
+                retSig: bundle.retSig || null,
+                hasRetailerUpdate: bundle.lifecycle.length > 1
+            };
+
             setProduct(mappedProduct);
+            setLifecycle(bundle.lifecycle);
+            setIsValid(true);
         } catch (err) {
-            console.error(err);
-            setValid(false);
+            console.error("Verification Error:", err);
+            setIsValid(false);
+            navigate('/fake');
         } finally {
             setLoading(false);
         }
@@ -135,91 +86,141 @@ const Product = () => {
         if (qrData) handleVerifyProduct(qrData);
     }, [qrData, handleVerifyProduct]);
 
-    if (loading) return <CircularProgress />;
+    if (loading) {
+        return (
+            <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+                <CircularProgress />
+            </Box>
+        );
+    }
 
-    if (!valid || !product) return <Typography>Invalid Product</Typography>;
+    if (!isValid || !product) {
+        return null; // Redirected to /fake
+    }
 
     return (
-        <Box sx={{ backgroundImage: `url(${bgImg})`, minHeight: "100vh", display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Paper sx={{ p: 4, maxWidth: 600, mx: 'auto', borderRadius: 4 }}>
-                <Avatar sx={{ m: 'auto', bgcolor: 'primary.main' }}>
-                    <VerifiedUserIcon />
-                </Avatar>
-                <Typography variant="h5" align="center" gutterBottom>Product Details</Typography>
+        <Box sx={{ backgroundImage: `url(${bgImg})`, minHeight: "100vh", p: 2 }}>
+            <Paper elevation={6} sx={{ p: 4, maxWidth: 700, mx: 'auto', borderRadius: 4 }}>
+                <Stack alignItems="center" spacing={2} sx={{ mb: 4 }}>
+                    <Avatar sx={{ bgcolor: 'success.main', width: 60, height: 60 }}>
+                        <VerifiedUserIcon fontSize="large" />
+                    </Avatar>
+                    <Typography variant="h5" fontWeight="bold">Authentic Product Verified</Typography>
+                    <Chip label="Blockchain Secured" color="success" icon={<SecurityIcon />} />
+                </Stack>
 
-                <Stack spacing={2}>
-                    <Typography><b>Name:</b> {product.name}</Typography>
+                {/* Product Image */}
+                {product.imageUrl && (
+                    <Box sx={{ textAlign: 'center', mb: 3 }}>
+                        <img
+                            src={product.imageUrl}
+                            alt={product.name}
+                            style={{ maxWidth: '100%', maxHeight: '300px', borderRadius: '8px', objectFit: 'contain' }}
+                        />
+                    </Box>
+                )}
+
+                {/* Product Details */}
+                <Typography variant="h6" color="primary" gutterBottom>Product Details</Typography>
+                <Stack spacing={1} sx={{ mb: 3 }}>
                     <Typography><b>Brand:</b> {product.brand}</Typography>
-                    <Typography><b>Serial:</b> {product.serialNumber}</Typography>
-                    <Typography><b>Description:</b> {product.description}</Typography>
-                    <Typography><b>Manufact Date:</b> {product.manufactDate}</Typography>
-                    <Chip label={product.isSold ? "Sold" : "Available"} color={product.isSold ? "error" : "success"} />
+                    <Typography><b>Name:</b> {product.name}</Typography>
+                    <Typography><b>Serial Number:</b> {product.serialNumber}</Typography>
+                    <Typography variant="body2">{product.description}</Typography>
                 </Stack>
 
                 <Divider sx={{ my: 3 }} />
 
-                <Typography variant="h6" gutterBottom>Provenance Timeline</Typography>
-                <Timeline
-                    sx={{
-                        [`& .${timelineOppositeContentClasses.root}`]: {
-                            flex: 0.2,
-                        },
-                    }}
-                >
-                    {times.map((time, index) => (
-                        <TimelineItem key={index}>
-                            <TimelineOppositeContent color="textSecondary">
-                                {new Date(time).toLocaleDateString()}
+                {/* Lifecycle: Manufacturer Origin First */}
+                <Typography variant="h6" color="primary" gutterBottom>Supply Chain Journey</Typography>
+
+                <Timeline sx={{ [`& .${timelineOppositeContentClasses.root}`]: { flex: 0.3 } }}>
+                    {/* Manufacturer Origin - Always shown prominently */}
+                    {lifecycle[0] && (
+                        <TimelineItem>
+                            <TimelineOppositeContent variant="caption">
+                                {new Date(lifecycle[0].time).toLocaleDateString(undefined, {
+                                    year: 'numeric', month: 'long', day: 'numeric'
+                                })}
                             </TimelineOppositeContent>
                             <TimelineSeparator>
-                                <TimelineDot />
-                                {index < times.length - 1 && <TimelineConnector />}
+                                <TimelineDot color="primary" variant="outlined">
+                                    <FactoryIcon />
+                                </TimelineDot>
+                                {lifecycle.length > 1 && <TimelineConnector />}
                             </TimelineSeparator>
                             <TimelineContent>
-                                <Typography variant="h6">{index === 0 ? 'Manufactured' : 'Received by Retailer'}</Typography>
-                                <Typography>Actor: {actors[index]}</Typography>
-                                <Typography>Location: {locations[index].split(', ')[1]}</Typography>
-                                <Typography>Address: {history[index].substring(0, 15)}...</Typography>
+                                <Typography variant="subtitle1" fontWeight="bold" color="primary">
+                                    1. Manufacturer Origin (Verified)
+                                </Typography>
+                                <Typography><b>Manufacturer:</b> {lifecycle[0].entity}</Typography>
+                                <Typography><b>Location:</b> {lifecycle[0].location}</Typography>
+                                <Chip label="Origin" size="small" color="primary" sx={{ mt: 1 }} />
+                            </TimelineContent>
+                        </TimelineItem>
+                    )}
+
+                    {/* Retailer Entries */}
+                    {lifecycle.slice(1).map((entry, idx) => (
+                        <TimelineItem key={idx}>
+                            <TimelineOppositeContent variant="caption">
+                                {new Date(entry.time).toLocaleDateString()}
+                            </TimelineOppositeContent>
+                            <TimelineSeparator>
+                                <TimelineDot color="secondary">
+                                    <StorefrontIcon />
+                                </TimelineDot>
+                                {idx < lifecycle.slice(1).length - 1 && <TimelineConnector />}
+                            </TimelineSeparator>
+                            <TimelineContent>
+                                <Typography variant="subtitle2" fontWeight="bold">
+                                    {idx + 2}. Received by Retailer
+                                </Typography>
+                                <Typography><b>Shop:</b> {entry.entity}</Typography>
+                                <Typography><b>Location:</b> {entry.location}</Typography>
+                                <Chip label="In Stock" color="success" size="small" sx={{ mt: 1 }} />
                             </TimelineContent>
                         </TimelineItem>
                     ))}
                 </Timeline>
 
-                <Box sx={{ mt: 3, p: 2, bgcolor: '#e8eaf6', borderRadius: 3 }}>
-                    <Typography variant="subtitle2" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <VerifiedUserIcon fontSize="small" color="primary" /> Digital Proofs
+                {/* If no retailer yet */}
+                {!product.hasRetailerUpdate && (
+                    <Typography variant="body1" color="text.secondary" sx={{ textAlign: 'center', my: 3, fontStyle: 'italic' }}>
+                        This product is authentic and directly from the manufacturer.<br />
+                        It has not yet been received by a retailer.
                     </Typography>
-                    <Stack spacing={1}>
-                        <Box>
-                            <Typography variant="caption" color="textSecondary">Manufacturer Signature:</Typography>
-                            <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.7rem', wordBreak: 'break-all' }}>
-                                {product.mfgSig}
-                            </Typography>
-                        </Box>
-                        {product.retSig && (
-                            <Box>
-                                <Typography variant="caption" color="textSecondary">Retailer Signature:</Typography>
-                                <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.7rem', wordBreak: 'break-all' }}>
-                                    {product.retSig}
-                                </Typography>
-                            </Box>
-                        )}
-                    </Stack>
+                )}
+
+                <Divider sx={{ my: 3 }} />
+
+                {/* Digital Signatures */}
+                <Box sx={{ p: 2, bgcolor: '#f5f5f5', borderRadius: 2 }}>
+                    <Typography variant="subtitle2" sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                        <SecurityIcon /> Digital Signatures on Blockchain
+                    </Typography>
+                    <Typography variant="caption" sx={{ wordBreak: 'break-all' }}>
+                        <b>Manufacturer Signature:</b> {product.mfgSig.substring(0, 20)}...{product.mfgSig.substring(-6)}
+                    </Typography>
+                    {product.retSig && (
+                        <Typography variant="caption" sx={{ wordBreak: 'break-all', mt: 1 }}>
+                            <b>Retailer Signature (Tx Hash):</b> {product.retSig.substring(0, 20)}...{product.retSig.substring(-6)}
+                        </Typography>
+                    )}
                 </Box>
 
                 <Stack direction="row" spacing={2} sx={{ mt: 4 }}>
-                    <Button fullWidth variant="outlined" onClick={() => navigate(-1)}>
-                        Scan Another
+                    <Button fullWidth variant="outlined" onClick={() => navigate('/scan')}>
+                        Scan Another Product
                     </Button>
-                    {product.isSold ? (
-                        <Button fullWidth variant="contained" color="error" disabled>
-                            Sold Out
-                        </Button>
-                    ) : (
-                        <Button fullWidth variant="contained" color="success" startIcon={<StorefrontIcon />}>
-                            Available
-                        </Button>
-                    )}
+                    <Button
+                        fullWidth
+                        variant="contained"
+                        color={product.isSold ? "error" : "success"}
+                        startIcon={<StorefrontIcon />}
+                    >
+                        {product.isSold ? "Already Sold" : product.hasRetailerUpdate ? "Available at Retailer" : "Direct from Manufacturer"}
+                    </Button>
                 </Stack>
             </Paper>
         </Box>

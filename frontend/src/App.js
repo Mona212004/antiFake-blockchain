@@ -1,14 +1,14 @@
-import React, { useState, useEffect } from 'react'; // Added useEffect here
-import { Routes, Route, Navigate } from 'react-router-dom'; // Removed BrowserRouter/Router import
+import React, { useState, useEffect } from 'react';
+import { Routes, Route, Navigate } from 'react-router-dom';
 
 // Layout & Home
 import Navbar from './components/home/Navbar';
 import Home from './components/home/Home';
 
-// Manufacturer (Generation Role)
+// Manufacturer (Unified Role)
 import Manufacturer from './components/pages/Manufacturer';
 import AddProduct from './components/pages/AddProduct';
-import ManufacturerDashboard from './components/pages/ManufacturerDashboard';
+// Redundant import removed: ManufacturerDashboard
 
 // Retailer (Update Role)
 import Retailer from './components/pages/Retailer';
@@ -16,10 +16,7 @@ import ScannerPage from './components/pages/ScannerPage';
 import UpdateProduct from './components/pages/UpdateProduct';
 
 // Consumer & Verification (Read Role)
-import ProductDetails from './components/pages/AuthenticProduct';
-import FakeProduct from './components/pages/FakeProduct';
 import Product from './components/pages/Product';
-import Admin from './components/pages/Admin';
 
 function App() {
   const [account, setAccount] = useState(null);
@@ -32,41 +29,47 @@ function App() {
         if (accounts.length > 0) {
           setAccount(accounts[0].toLowerCase());
         }
+
+        // Listen for account changes globally
+        window.ethereum.on('accountsChanged', (accounts) => {
+          setAccount(accounts[0] ? accounts[0].toLowerCase() : null);
+        });
       }
     };
     checkConnection();
+
+    // Cleanup listener on unmount
+    return () => {
+      if (window.ethereum && window.ethereum.removeListener) {
+        window.ethereum.removeListener('accountsChanged', () => { });
+      }
+    };
   }, []);
 
   return (
-    // Replaced <Router> with a Fragment <> because the Router is already in index.js
     <>
       <Navbar account={account} setAccount={setAccount} />
       <Routes>
         <Route path="/" element={<Home />} />
 
-        {/* Manufacturer-Only Routes */}
+        {/* Unified Manufacturer Portal */}
         <Route path="/manufacturer" element={
           account === manufacturerAddress ? <Manufacturer /> : <Navigate to="/" />
         } />
+
         <Route path="/add-product" element={
           account === manufacturerAddress ? <AddProduct /> : <Navigate to="/" />
         } />
 
-        {/* Additional Manufacturer view if needed */}
-        <Route path="/manufacturer-dashboard" element={
-          account === manufacturerAddress ? <ManufacturerDashboard /> : <Navigate to="/" />
-        } />
-
-        {/* Retailer Routes */}
         <Route path="/retailer" element={<Retailer />} />
-        <Route path="/scan" element={<ScannerPage />} />
+        <Route path="/scan" element={<ScannerPage account={account} />} />
         <Route path="/update-product/:id" element={<UpdateProduct />} />
 
-        {/* Verification & General View */}
-        <Route path="/verify/:id" element={<ProductDetails />} />
-        <Route path="/product/:id" element={<Product />} />
-        <Route path="/fake" element={<FakeProduct />} />
-        <Route path="/admin" element={<Admin />} />
+        {/* Consumer Verification View */}
+        <Route path="/product" element={<Product />} />
+
+        {/* Catch-all redirect */}
+        <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </>
   );
