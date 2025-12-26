@@ -20,7 +20,7 @@ import Product from './components/pages/Product';
 
 function App() {
   const [account, setAccount] = useState(null);
-  const manufacturerAddress = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".toLowerCase();
+  const manufacturerAddress = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".toLowerCase();
 
   useEffect(() => {
     const checkConnection = async () => {
